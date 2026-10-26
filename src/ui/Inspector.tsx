@@ -171,7 +171,12 @@ function NodePanel() {
           <input className="w-full rounded border border-transparent bg-transparent text-sm font-semibold text-slate-100 hover:border-slate-700 focus:border-sky-500 focus:outline-none" value={n.label} onChange={(e) => rename(e.target.value)} />
           <div className="text-[11px] text-slate-500">{spec.name}</div>
         </div>
-        <button onClick={() => ws.setSelected(null)} className="text-slate-500 hover:text-slate-200" title="Close">✕</button>
+        {n.kind !== 'client' && (
+          <button onClick={remove} className="rounded border border-red-500/40 px-1.5 py-0.5 text-[11px] text-red-300 hover:bg-red-500/10" title="Delete component">
+            Delete
+          </button>
+        )}
+        <button onClick={() => ws.setSelected(null)} className="text-slate-500 hover:text-slate-200" title="Close panel">✕</button>
       </div>
       <p className="text-xs text-slate-400">{spec.description}</p>
 

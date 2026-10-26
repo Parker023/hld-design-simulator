@@ -5,6 +5,7 @@ import { CHALLENGES, node as makeNode } from '../data/challenges'
 import { buildModel } from '../engine/simulate'
 import type { ComponentKind } from '../engine/types'
 import { Notes } from './Review'
+import { freeSpot } from './layout'
 import { useWS, type BottomTab, type LeftTab } from './store'
 
 export function LeftSidebar() {
@@ -36,17 +37,17 @@ function Palette() {
   const { update, setSelected, state } = useWS()
   const rf = useReactFlow()
   const add = (kind: ComponentKind) => {
-    // Drop at the centre of the visible canvas, nudged so repeated clicks don't stack exactly.
+    // Place near the centre of the visible canvas, in the nearest spot not covered by an existing node.
     const el = document.querySelector('.react-flow')?.getBoundingClientRect()
     const c = el ? rf.screenToFlowPosition({ x: el.left + el.width / 2, y: el.top + el.height / 2 }) : { x: 0, y: 0 }
-    const k = state.design.nodes.length % 5
-    const n = makeNode(kind, c.x - 95 + k * 24, c.y - 30 + k * 24, {}, undefined, `${kind}-${Date.now().toString(36)}`)
+    const p = freeSpot(state.design.nodes.map((x) => x.position), { x: c.x - 95, y: c.y - 30 })
+    const n = makeNode(kind, p.x, p.y, {}, undefined, `${kind}-${Date.now().toString(36)}`)
     update((s) => ({ ...s, design: { ...s.design, nodes: [...s.design.nodes, n] } }))
     setSelected(n.id)
   }
   return (
     <div className="space-y-1 p-2">
-      <p className="px-1 pb-1 text-[11px] text-slate-500">Drag onto the canvas or click to add. Connect right handle → left handle.</p>
+      <p className="px-1 pb-1 text-[11px] text-slate-500">Drag onto the canvas or click to add. Connect right handle → left handle. Select a component or connection and press ✕ (or Delete) to remove it.</p>
       {PALETTE_ORDER.map((k) => {
         const s = CATALOG[k]
         return (
