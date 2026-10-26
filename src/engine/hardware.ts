@@ -282,3 +282,28 @@ export function machineCost(c: ComponentConfig): number {
   const disk = DISK[(str(c, 'diskType', 'ssd') as DiskType)] ?? DISK.ssd
   return num(c, 'vcpu', 1) * USD_PER_VCPU + num(c, 'ramGb', 1) * USD_PER_GB_RAM + num(c, 'diskGb') * disk.usdPerGb
 }
+
+export interface OverriddenValue {
+  key: string
+  manual: number
+  derived: number
+}
+
+/**
+ * Values the user typed (in manual mode) that hardware sizing is currently replacing.
+ * A stored value counts as user-typed when it differs from the catalog default — new
+ * components copy defaults into their config, so a default value isn't a user choice.
+ */
+export function overriddenManualValues(kind: ComponentKind, c: ComponentConfig, catalogDefaults: ComponentConfig, w?: Workload): OverriddenValue[] {
+  if (!isHardwareMode(kind, c)) return []
+  const derived = new Map(HARDWARE[kind]!.derive(c, w).map((s) => [s.key, s.value]))
+  const out: OverriddenValue[] = []
+  for (const key of HARDWARE[kind]!.derived) {
+    const v = c[key]
+    const dv = derived.get(key)
+    if (typeof v !== 'number' || dv === undefined) continue
+    if (v === catalogDefaults[key] || Math.abs(v - dv) < 1e-9) continue
+    out.push({ key, manual: v, derived: dv })
+  }
+  return out
+}

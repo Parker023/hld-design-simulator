@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { CATALOG, componentAvailability, derivedKeys, monthlyCost, resolveConfig, withDefaults, type FieldDef } from '../engine/components'
 import { fmtNum } from '../engine/calculator'
-import { hardwareDerivations, isHardwareMode, machineCost } from '../engine/hardware'
+import { hardwareDerivations, isHardwareMode, machineCost, overriddenManualValues } from '../engine/hardware'
 import { hintsFor, insights, TRADEOFFS } from '../engine/analysis'
 import { cacheHitRatio } from '../engine/simulate'
 import type { ConfigValue, NodeTickMetrics } from '../engine/types'
@@ -158,6 +158,9 @@ function NodePanel() {
   const hwMode = isHardwareMode(n.kind, raw)
   const derivations = hardwareDerivations(n.kind, raw, state.workload)
   const hidden = new Set(hwMode ? derivedKeys(n.kind) : [])
+  const overridden = overriddenManualValues(n.kind, raw, spec.defaults, state.workload)
+  const fieldLabel = (key: string) => spec.fields.find((f) => f.key === key)?.label ?? key
+  const fmtVal = (v: number) => (v < 100 ? String(+v.toFixed(2)) : fmtNum(v))
   const t = result.ticks[Math.min(hasRun ? tick : result.ticks.length - 1, result.ticks.length - 1)]
   const m: NodeTickMetrics | undefined = t?.nodes[n.id]
   const [hintIdx, setHintIdx] = useState(0)
@@ -256,6 +259,39 @@ function NodePanel() {
                 <span className="font-normal text-slate-400">≈ ${Math.round(machineCost(raw)).toLocaleString()}/mo each</span>
               </div>
               {spec.fields.filter((f) => f.hw).map((f) => <Field key={f.key} f={f} value={raw[f.key]} onChange={(v) => set(f.key, v)} />)}
+              {overridden.length > 0 && (
+                <div role="status" className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-100">
+                  <div className="font-semibold text-amber-200">Your manual values are not being used</div>
+                  <ul className="mt-1 space-y-0.5">
+                    {overridden.map((o) => (
+                      <li key={o.key}>
+                        {fieldLabel(o.key)}: you set <b>{fmtVal(o.manual)}</b>, hardware sizing uses <b>{fmtVal(o.derived)}</b>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="mt-1.5 flex flex-wrap gap-2">
+                    <button className="rounded bg-amber-400 px-1.5 py-0.5 font-semibold text-slate-950 hover:bg-amber-300" onClick={() => set('sizing', 'manual')}>
+                      Use my values (manual)
+                    </button>
+                    <button
+                      className="rounded border border-amber-400/50 px-1.5 py-0.5 text-amber-100 hover:bg-amber-500/10"
+                      onClick={() =>
+                        update((s) => ({
+                          ...s,
+                          design: {
+                            ...s.design,
+                            nodes: s.design.nodes.map((x) =>
+                              x.id === n.id ? { ...x, config: { ...x.config, ...Object.fromEntries(overridden.map((o) => [o.key, spec.defaults[o.key]])) } } : x,
+                            ),
+                          },
+                        }))
+                      }
+                    >
+                      Keep hardware, discard them
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="rounded border border-slate-800 bg-slate-950/70 p-2">
                 <div className="mb-1 flex items-center text-[10.5px] font-semibold uppercase tracking-wide text-slate-400">
                   Calculated capacity

@@ -113,6 +113,8 @@ export interface TickResult {
   dbWriteRps: number
   /** read requests offered to stores (demand, before capacity limits) */
   dbReadDemandRps: number
+  /** writes that ended at a component with no database/storage behind it */
+  unpersistedWriteRps: number
   cacheHitRps: number
   queueBacklog: number
   nodes: Record<string, NodeTickMetrics>
@@ -141,6 +143,7 @@ export interface SimSummary {
   peakLatencyMs: number
   peakDbReadRps: number
   peakDbReadDemandRps: number
+  peakUnpersistedWriteRps: number
   peakDbWriteRps: number
   peakCacheHitRps: number
   maxQueueBacklog: number

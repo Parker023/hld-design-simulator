@@ -215,6 +215,12 @@ export function insights(design: Design, workload: Workload, summary: SimSummary
   const e = estimate(workload)
   if (!summary.bottlenecks.length && summary.errorRate === 0) out.push({ level: 'good', title: 'No component overloaded', detail: `Peak ${fmtNum(summary.peakOfferedRps)} req/s served. Try a harsher scenario: 10× peak, a cache outage, or a DB failure.` })
   for (const b of summary.bottlenecks.slice(0, 3)) out.push({ level: 'bad', title: `Bottleneck: ${b.label}`, detail: b.reason })
+  if ((summary.peakUnpersistedWriteRps ?? 0) > 0)
+    out.push({
+      level: 'bad',
+      title: 'Writes are not saved anywhere',
+      detail: `Up to ${summary.peakUnpersistedWriteRps >= 1 ? fmtNum(summary.peakUnpersistedWriteRps) : summary.peakUnpersistedWriteRps.toPrecision(2)} writes/s end at a component with no database or storage behind it, so that data would be lost. Connect it to a database, NoSQL store or object storage.`,
+    })
   if (summary.avgLatencyMs > workload.latencyTargetMs) out.push({ level: 'warn', title: 'Latency target missed', detail: `Modeled mean ${summary.avgLatencyMs.toFixed(1)} ms vs target ${workload.latencyTargetMs} ms.` })
   if (summary.availability < workload.availabilityTarget) out.push({ level: 'warn', title: 'Availability below target', detail: `Modeled ${nines(summary.availability)} vs target ${nines(workload.availabilityTarget)}. Look for single instances on the request path.` })
   // storage capacity

@@ -329,6 +329,7 @@ export function simulate(design: Design, workload: Workload, settings: SimSettin
   const backlog = new Map<string, ClassRates>([...nodes.keys()].map((k) => [k, zero()]))
   const prevDownstream = new Map<string, number>()
   const unrouted = new Set<string>()
+  const unpersistedAt = new Set<string>()
   const ticks: TickResult[] = []
 
   for (let t = 0; t < settings.ticks; t++) {
@@ -338,6 +339,7 @@ export function simulate(design: Design, workload: Workload, settings: SimSettin
     const metrics: Record<string, NodeTickMetrics> = {}
     const edges: Record<string, EdgeTickMetrics> = {}
     const shares = new Map<string, Record<RequestClass, Share[]>>()
+    let unpersisted = 0
     let syncBacklogBefore = 0
     for (const [id, b] of backlog) if (nodes.get(id)!.category !== 'async') syncBacklogBefore += b.read + b.write
 
@@ -507,7 +509,15 @@ export function simulate(design: Design, workload: Workload, settings: SimSettin
 
       function route(node: ModelNode, o: ClassRates, met: NodeTickMetrics) {
         const targets = node.targets.map((t) => nodes.get(t)!)
-        if (!targets.length) return // terminal: served here
+        if (!targets.length) {
+          // Terminal: served here. Writes ending anywhere but a store (or lock) are never saved.
+          const lost = node.category === 'source' || node.category === 'store' || node.category === 'sidecar' ? 0 : o.write + (node.kind === 'worker' ? o.async : 0)
+          if (lost > 0) {
+            unpersisted += lost / dt
+            unpersistedAt.add(node.label)
+          }
+          return
+        }
         const push = (cls: RequestClass, amount: number, list: ModelNode[], weights: number[], to: RequestClass = cls, sync = true) => {
           if (amount <= 0 || !list.length) return
           const total = weights.reduce((a, x) => a + x, 0)
@@ -683,6 +693,7 @@ export function simulate(design: Design, workload: Workload, settings: SimSettin
       dbReadRps: dbRead,
       dbWriteRps: dbWrite,
       dbReadDemandRps: dbReadDemand,
+      unpersistedWriteRps: unpersisted,
       cacheHitRps: hits,
       queueBacklog: qBacklog,
       nodes: metrics,
@@ -691,6 +702,10 @@ export function simulate(design: Design, workload: Workload, settings: SimSettin
   }
 
   const warnings = [...model.warnings, ...unrouted]
+  if (unpersistedAt.size)
+    warnings.push(
+      `Writes are not saved: ${[...unpersistedAt].join(', ')} receive${unpersistedAt.size === 1 ? 's' : ''} writes but ${unpersistedAt.size === 1 ? 'is' : 'are'} not connected to any database or storage. The simulation counts them as successful, but the data would be lost.`,
+    )
   return { ticks, summary: summarize(model, ticks, dt), warnings }
 }
 
@@ -741,6 +756,7 @@ function summarize(model: Model, ticks: TickResult[], dt: number) {
     peakDbReadRps: Math.max(0, ...ticks.map((t) => t.dbReadRps)),
     peakDbWriteRps: Math.max(0, ...ticks.map((t) => t.dbWriteRps)),
     peakDbReadDemandRps: Math.max(0, ...ticks.map((t) => t.dbReadDemandRps)),
+    peakUnpersistedWriteRps: Math.max(0, ...ticks.map((t) => t.unpersistedWriteRps)),
     peakCacheHitRps: Math.max(0, ...ticks.map((t) => t.cacheHitRps)),
     maxQueueBacklog: Math.max(0, ...ticks.map((t) => t.queueBacklog)),
     monthlyCostUsd,

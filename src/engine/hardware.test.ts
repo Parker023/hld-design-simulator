@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { CATALOG, monthlyCost, resolveConfig } from './components'
-import { HW, hardwareDerivations } from './hardware'
+import { HW, hardwareDerivations, overriddenManualValues } from './hardware'
+import { insights } from './analysis'
 import { estimate } from './calculator'
 import { simulate } from './simulate'
 import { CHALLENGES, edge, node } from '../data/challenges'
@@ -138,5 +139,51 @@ describe('response connections', () => {
 describe('field help', () => {
   it('every configurable field has an explanation', () => {
     for (const spec of Object.values(CATALOG)) for (const f of spec.fields) expect([spec.kind, f.key, (f.help ?? '').length > 10]).toEqual([spec.kind, f.key, true])
+  })
+})
+
+describe('manual values overridden by hardware sizing', () => {
+  const defaults = CATALOG.app_server.defaults
+  it('reports a typed manual value that hardware replaces (exported design case)', () => {
+    // From the user's export: maxConcurrent 10 typed in manual mode, then switched to hardware with 2 GB RAM.
+    const cfg = resolveConfig('app_server', { sizing: 'hardware', maxConcurrent: 10, ramGb: 2, rpsPerCore: 2, rpsPerInstance: 1000 })
+    const raw = { ...defaults, sizing: 'hardware', maxConcurrent: 10, ramGb: 2, rpsPerCore: 2, rpsPerInstance: 1000 }
+    expect(cfg.maxConcurrent).toBe(102)
+    expect(overriddenManualValues('app_server', raw, defaults)).toEqual([{ key: 'maxConcurrent', manual: 10, derived: 102 }])
+  })
+  it('ignores values that are just the copied catalog defaults', () => {
+    expect(overriddenManualValues('app_server', { ...defaults, vcpu: 8 }, defaults)).toEqual([])
+  })
+  it('reports nothing in manual mode', () => {
+    expect(overriddenManualValues('app_server', { ...defaults, sizing: 'manual', maxConcurrent: 10 }, defaults)).toEqual([])
+  })
+})
+
+describe('writes without a persistent store', () => {
+  it('are flagged when the app has no database behind it', () => {
+    const c = node('client', 0, 0, {}, 'C', 'client')
+    const app = node('app_server', 0, 0, { instances: 10 }, 'App', 'app')
+    const r = simulate({ nodes: [c, app], edges: [edge(c, app)] }, W, PEAK)
+    expect(last(r.ticks).unpersistedWriteRps).toBeCloseTo(estimate(W).peakWriteRps, 6)
+    expect(r.summary.peakUnpersistedWriteRps).toBeGreaterThan(0)
+    expect(r.warnings.some((w) => w.startsWith('Writes are not saved: App'))).toBe(true)
+    expect(insights({ nodes: [c, app], edges: [edge(c, app)] }, W, r.summary).some((i) => i.title === 'Writes are not saved anywhere')).toBe(true)
+  })
+  it('are not flagged when writes reach a database (directly or through a cache)', () => {
+    const c = node('client', 0, 0, {}, 'C', 'client')
+    const app = node('app_server', 0, 0, {}, 'App', 'app')
+    const cache = node('cache', 0, 0, {}, 'Redis', 'cache')
+    const db = node('rdbms', 0, 0, {}, 'DB', 'db')
+    const direct = simulate({ nodes: [c, app, db], edges: [edge(c, app), edge(app, db)] }, W, PEAK)
+    const viaCache = simulate({ nodes: [c, app, cache, db], edges: [edge(c, app), edge(app, cache), edge(cache, db)] }, W, PEAK)
+    expect(direct.summary.peakUnpersistedWriteRps).toBe(0)
+    expect(viaCache.summary.peakUnpersistedWriteRps).toBe(0)
+  })
+  it('are flagged when a cache has no database behind it', () => {
+    const c = node('client', 0, 0, {}, 'C', 'client')
+    const app = node('app_server', 0, 0, {}, 'App', 'app')
+    const cache = node('cache', 0, 0, {}, 'Redis', 'cache')
+    const r = simulate({ nodes: [c, app, cache], edges: [edge(c, app), edge(app, cache)] }, W, PEAK)
+    expect(r.warnings.some((w) => w.includes('Redis'))).toBe(true)
   })
 })
