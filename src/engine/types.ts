@@ -95,6 +95,9 @@ export interface EdgeTickMetrics {
   read: number
   write: number
   async: number
+  /** response edges (component → client): successful responses per second */
+  response?: number
+  responseBytesPerSec?: number
 }
 
 export interface TickResult {

@@ -4,6 +4,7 @@ import { fmtNum } from '../engine/calculator'
 import type { SimResult } from '../engine/types'
 import { STATUS_STYLE } from './Canvas'
 import { WorkloadInputs } from './Calculator'
+import { HelpTip } from './HelpTip'
 import { useWS } from './store'
 
 const axis = { stroke: '#475569', fontSize: 10 }
@@ -64,7 +65,7 @@ export function Timeline() {
     <div className="space-y-3 p-3">
       <div className="flex flex-wrap items-end gap-3 text-xs text-slate-300">
         <label>
-          <div className="mb-0.5 text-[11px] text-slate-400">Traffic profile</div>
+          <div className="mb-0.5 flex items-center text-[11px] text-slate-400">Traffic profile<HelpTip text="Shape of traffic over the run. ramp: normal → peak → normal. spike: a sudden burst. steady peak / average: constant load." /></div>
           <select className="rounded border border-slate-700 bg-slate-950 px-2 py-1" value={state.settings.profile} onChange={(e) => update((s) => ({ ...s, settings: { ...s.settings, profile: e.target.value as never } }))}>
             <option value="ramp">ramp: avg → peak → avg</option>
             <option value="spike">spike: sudden burst to peak</option>
@@ -73,13 +74,13 @@ export function Timeline() {
           </select>
         </label>
         <label>
-          <div className="mb-0.5 text-[11px] text-slate-400">Time step (simulated s / tick)</div>
+          <div className="mb-0.5 flex items-center text-[11px] text-slate-400">Time step (simulated s / tick)<HelpTip text="How many simulated seconds each step covers. Smaller steps show queues building up in more detail." /></div>
           <select className="rounded border border-slate-700 bg-slate-950 px-2 py-1" value={state.settings.dt} onChange={(e) => update((s) => ({ ...s, settings: { ...s.settings, dt: Number(e.target.value) } }))}>
             {[0.25, 0.5, 1, 2, 5].map((v) => <option key={v} value={v}>{v}</option>)}
           </select>
         </label>
         <label>
-          <div className="mb-0.5 text-[11px] text-slate-400">Ticks</div>
+          <div className="mb-0.5 flex items-center text-[11px] text-slate-400">Ticks<HelpTip text="Number of simulation steps. Total simulated time = ticks × time step." /></div>
           <input type="number" min={5} max={600} className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-1" value={state.settings.ticks} onChange={(e) => update((s) => ({ ...s, settings: { ...s.settings, ticks: Math.max(5, Math.min(600, Number(e.target.value) || 60)) } }))} />
         </label>
         <div className="flex-1">

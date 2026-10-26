@@ -1,10 +1,12 @@
 import { useState } from 'react'
-import { CATALOG, componentAvailability, monthlyCost, withDefaults, type FieldDef } from '../engine/components'
+import { CATALOG, componentAvailability, derivedKeys, monthlyCost, resolveConfig, withDefaults, type FieldDef } from '../engine/components'
 import { fmtNum } from '../engine/calculator'
+import { hardwareDerivations, isHardwareMode, machineCost } from '../engine/hardware'
 import { hintsFor, insights, TRADEOFFS } from '../engine/analysis'
 import { cacheHitRatio } from '../engine/simulate'
 import type { ConfigValue, NodeTickMetrics } from '../engine/types'
 import { STATUS_STYLE } from './Canvas'
+import { HelpTip } from './HelpTip'
 import { useWS } from './store'
 
 export function Inspector() {
@@ -81,11 +83,11 @@ function OverviewPanel() {
 function Field({ f, value, onChange }: { f: FieldDef; value: ConfigValue | undefined; onChange: (v: ConfigValue) => void }) {
   const base = 'w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 focus:border-sky-500 focus:outline-none'
   return (
-    <label className="block" title={f.help}>
+    <label className="block">
       <div className="mb-0.5 flex items-center justify-between text-[11px] text-slate-400">
-        <span>
+        <span className="flex items-center">
           {f.label}
-          {f.help && <span className="ml-1 cursor-help text-slate-600">ⓘ</span>}
+          <HelpTip text={f.help} />
         </span>
         {f.type === 'number' && f.unit && <span className="text-slate-600">{f.unit}</span>}
       </div>
@@ -103,7 +105,6 @@ function Field({ f, value, onChange }: { f: FieldDef; value: ConfigValue | undef
           {value ? 'Down for this run' : 'Up'}
         </span>
       )}
-      {f.help && f.type !== 'boolean' && <div className="mt-0.5 text-[10.5px] leading-snug text-slate-500">{f.help}</div>}
     </label>
   )
 }
@@ -113,14 +114,19 @@ function Connections({ nodeId }: { nodeId: string }) {
   const { state, update } = useWS()
   const out = state.design.edges.filter((e) => e.source === nodeId)
   const label = (id: string) => state.design.nodes.find((n) => n.id === id)?.label ?? id
-  const candidates = state.design.nodes.filter((n) => n.id !== nodeId && n.kind !== 'client' && !out.some((e) => e.target === n.id))
+  const self = state.design.nodes.find((n) => n.id === nodeId)
+  const candidates = state.design.nodes.filter((n) => n.id !== nodeId && !(self?.kind === 'client' && n.kind === 'client') && !out.some((e) => e.target === n.id))
+  const isClient = (id: string) => state.design.nodes.find((n) => n.id === id)?.kind === 'client'
   return (
     <div className="space-y-1">
-      <h4 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Sends requests to</h4>
+      <h4 className="flex items-center text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+        Connections
+        <HelpTip text="Requests: where this component sends the work it can’t finish itself. Response (→ Client): draws the reply path back to the user; it shows successful responses and bandwidth but doesn’t route requests." />
+      </h4>
       {out.length === 0 && <div className="text-xs text-slate-500">Nothing (terminal component).</div>}
       {out.map((e) => (
         <div key={e.id} className="flex items-center justify-between rounded bg-slate-900 px-2 py-1 text-xs text-slate-200">
-          → {label(e.target)}
+          {isClient(e.target) ? <span className="text-emerald-300">↩ response to {label(e.target)}</span> : <span>→ {label(e.target)}</span>}
           <button className="text-slate-500 hover:text-red-300" title="Remove connection" onClick={() => update((s) => ({ ...s, design: { ...s.design, edges: s.design.edges.filter((x) => x.id !== e.id) } }))}>✕</button>
         </div>
       ))}
@@ -135,7 +141,7 @@ function Connections({ nodeId }: { nodeId: string }) {
           }}
         >
           <option value="">+ Connect to…</option>
-          {candidates.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+          {candidates.map((c) => <option key={c.id} value={c.id}>{c.kind === 'client' ? `↩ Response to ${c.label}` : `→ ${c.label}`}</option>)}
         </select>
       )}
     </div>
@@ -147,7 +153,11 @@ function NodePanel() {
   const { state, update, selected, result, tick, hasRun } = ws
   const n = state.design.nodes.find((x) => x.id === selected)!
   const spec = CATALOG[n.kind]
-  const cfg = withDefaults(n.kind, n.config)
+  const raw = withDefaults(n.kind, n.config)
+  const cfg = resolveConfig(n.kind, n.config, state.workload)
+  const hwMode = isHardwareMode(n.kind, raw)
+  const derivations = hardwareDerivations(n.kind, raw, state.workload)
+  const hidden = new Set(hwMode ? derivedKeys(n.kind) : [])
   const t = result.ticks[Math.min(hasRun ? tick : result.ticks.length - 1, result.ticks.length - 1)]
   const m: NodeTickMetrics | undefined = t?.nodes[n.id]
   const [hintIdx, setHintIdx] = useState(0)
@@ -233,7 +243,41 @@ function NodePanel() {
       {spec.fields.length > 0 && (
         <div className="space-y-2.5">
           <h4 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Configuration</h4>
-          {spec.fields.map((f) => <Field key={f.key} f={f} value={cfg[f.key]} onChange={(v) => set(f.key, v)} />)}
+          {spec.fields
+            .filter((f) => f.key === 'sizing')
+            .map((f) => <Field key={f.key} f={f} value={raw[f.key]} onChange={(v) => set(f.key, v)} />)}
+          {hwMode && (
+            <div className="space-y-2.5 rounded-md border border-sky-500/25 bg-sky-500/5 p-2">
+              <div className="flex items-center justify-between text-[11px] font-semibold text-sky-200">
+                <span className="flex items-center">
+                  Machine size
+                  <HelpTip text="The hardware of each instance. Throughput, memory and storage below are calculated from it." />
+                </span>
+                <span className="font-normal text-slate-400">≈ ${Math.round(machineCost(raw)).toLocaleString()}/mo each</span>
+              </div>
+              {spec.fields.filter((f) => f.hw).map((f) => <Field key={f.key} f={f} value={raw[f.key]} onChange={(v) => set(f.key, v)} />)}
+              <div className="rounded border border-slate-800 bg-slate-950/70 p-2">
+                <div className="mb-1 flex items-center text-[10.5px] font-semibold uppercase tracking-wide text-slate-400">
+                  Calculated capacity
+                  <HelpTip text="Derived from the machine size using the modeled per-core and per-disk figures in MODEL.md. Switch Sizing mode to manual to type these numbers yourself." />
+                </div>
+                <ul className="space-y-1.5">
+                  {derivations.map((dv) => (
+                    <li key={dv.key} className="text-[11px]">
+                      <div className="flex justify-between gap-2 text-slate-200">
+                        <span>{dv.label}</span>
+                        <span className="font-mono tabular-nums text-sky-300">{dv.unit === 'fraction' ? `${(dv.value * 100).toFixed(1)}%` : `${dv.value < 100 ? +dv.value.toFixed(2) : fmtNum(dv.value)} ${dv.unit}`}</span>
+                      </div>
+                      <div className="font-mono text-[10px] leading-snug text-slate-500">{dv.formula}</div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+          {spec.fields
+            .filter((f) => f.key !== 'sizing' && !f.hw && !hidden.has(f.key))
+            .map((f) => <Field key={f.key} f={f} value={raw[f.key]} onChange={(v) => set(f.key, v)} />)}
         </div>
       )}
 

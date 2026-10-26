@@ -5,6 +5,9 @@ deterministic traffic simulation show where it breaks.
 
 * **Guided interview mode**: 10 steps from requirements to trade-off review, with hints on request.
 * **Free-form lab**: drag 16 component types onto a canvas, connect them, configure them, run traffic.
+  Size machines by **vCPU, RAM and disk** (capacity is calculated, with the formula shown), or type
+  throughput manually. Every input has a **?** explaining it. Draw **response paths** back to the
+  client to see successful responses and bandwidth.
 * **Back-of-the-envelope calculator**: formulas with substituted values; estimate first, then reveal.
 * **Simulation**: request flow, utilization, queues, latency, cache hits/misses, failures, rate limiting.
 * **Experiments**: snapshot designs and compare before/after (throughput, latency, DB load, errors,

@@ -20,8 +20,9 @@ import {
   type NodeChange,
   type NodeProps,
 } from '@xyflow/react'
-import { CATALOG, num, withDefaults } from '../engine/components'
-import { fmtNum } from '../engine/calculator'
+import { CATALOG, num, resolveConfig } from '../engine/components'
+import { isHardwareMode } from '../engine/hardware'
+import { fmtBytes, fmtNum } from '../engine/calculator'
 import { buildModel } from '../engine/simulate'
 import type { ComponentKind, EdgeTickMetrics, HealthStatus, NodeTickMetrics } from '../engine/types'
 import { node as makeNode } from '../data/challenges'
@@ -48,7 +49,13 @@ type CompNodeData = {
 type CompNode = Node<CompNodeData, 'component'>
 
 function summaryLine(kind: ComponentKind, cfg: Record<string, unknown>): string {
-  const c = withDefaults(kind, cfg as never)
+  const c = cfg as Record<string, number | string | boolean>
+  const hw = isHardwareMode(kind, c) ? `${num(c, 'vcpu')} vCPU · ${num(c, 'ramGb')} GB` : ''
+  const line = capacityLine(kind, c)
+  return hw ? `${hw}${line ? ' · ' + line : ''}` : line
+}
+
+function capacityLine(kind: ComponentKind, c: Record<string, number | string | boolean>): string {
   switch (kind) {
     case 'app_server':
     case 'dns_lb':
@@ -56,7 +63,7 @@ function summaryLine(kind: ComponentKind, cfg: Record<string, unknown>): string 
     case 'worker':
       return `${num(c, 'instances', 1)} × ${fmtNum(num(c, 'rpsPerInstance'))}/s`
     case 'cache':
-      return c.hitRatioMode === 'working-set' ? `${num(c, 'memoryGb')} GB · working-set` : `hit ${(num(c, 'hitRatio') * 100).toFixed(0)}% · ${num(c, 'memoryGb')} GB`
+      return c.hitRatioMode === 'working-set' ? `${+num(c, 'memoryGb').toFixed(1)} GB cache · working-set` : `hit ${(num(c, 'hitRatio') * 100).toFixed(0)}%`
     case 'rdbms':
       return `R ${fmtNum(num(c, 'readRps'))}/s · W ${fmtNum(num(c, 'writeRps'))}/s${num(c, 'readReplicas') ? ` · +${num(c, 'readReplicas')} rep` : ''}`
     case 'read_replica':
@@ -66,7 +73,7 @@ function summaryLine(kind: ComponentKind, cfg: Record<string, unknown>): string 
     case 'sharded_db':
       return `${num(c, 'shards')} shards · skew ${num(c, 'hotShardSkew')}`
     case 'queue':
-      return `${num(c, 'partitions')} partitions`
+      return `${num(c, 'partitions')} partitions${isHardwareMode('queue', c) ? ` · ${num(c, 'brokers')} brokers` : ''}`
     case 'rate_limiter':
       return `limit ${fmtNum(num(c, 'limitRps'))}/s`
     case 'cdn':
@@ -114,7 +121,12 @@ const ComponentNode = memo(function ComponentNode({ id, data, selected }: NodePr
           ✕
         </button>
       )}
-      {data.kind !== 'client' && <Handle type="target" position={Position.Left} className="!h-3 !w-3 !border-2 !border-slate-900 !bg-slate-400" />}
+      <Handle
+        type="target"
+        position={Position.Left}
+        className={`!h-3 !w-3 !border-2 !border-slate-900 ${data.kind === 'client' ? '!bg-emerald-400' : '!bg-slate-400'}`}
+        title={data.kind === 'client' ? 'Drop a connection here to draw a response path back to the client' : undefined}
+      />
       <Handle type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-slate-900 !bg-sky-400" />
       <div className="flex items-center gap-2">
         <span className="text-lg leading-none">{spec.icon}</span>
@@ -175,19 +187,30 @@ const ComponentNode = memo(function ComponentNode({ id, data, selected }: NodePr
   )
 })
 
-type FlowEdgeData = { em?: EdgeTickMetrics; playing: boolean; virtual?: boolean; targetStatus?: HealthStatus }
+type FlowEdgeData = { em?: EdgeTickMetrics; playing: boolean; virtual?: boolean; response?: boolean; targetStatus?: HealthStatus }
 type FlowEdgeT = Edge<FlowEdgeData, 'flow'>
+
+/** Response paths go back to the client as a U-shape below the request flow, so they don't cross nodes. */
+function responsePath(sx: number, sy: number, tx: number, ty: number): [string, number, number] {
+  const drop = Math.max(sy, ty) + 90
+  const path = `M ${sx} ${sy} C ${sx + 70} ${sy}, ${sx + 70} ${drop}, ${sx} ${drop} L ${tx} ${drop} C ${tx - 70} ${drop}, ${tx - 70} ${ty}, ${tx} ${ty}`
+  return [path, (sx + tx) / 2, drop]
+}
 
 const FlowEdge = memo(function FlowEdge(p: EdgeProps<FlowEdgeT>) {
   const { update } = useWS()
-  const [path, lx, ly] = getBezierPath(p)
+  const [path, lx, ly] = p.data?.response ? responsePath(p.sourceX, p.sourceY, p.targetX, p.targetY) : getBezierPath(p)
   const em = p.data?.em
   const rate = em?.rate ?? 0
   const width = rate > 0 ? Math.min(6, 1.2 + Math.log10(rate + 1) * 0.9) : 1.2
-  const hot = p.data?.targetStatus === 'overloaded' || p.data?.targetStatus === 'failed'
-  const stroke = p.selected ? '#38bdf8' : rate > 0 ? (hot ? '#ef4444' : '#475569') : '#334155'
-  const dots: { cls: keyof typeof CLASS_COLOR; i: number; n: number }[] = []
-  if (em && p.data?.playing) {
+  const isResp = !!p.data?.response
+  const hot = !isResp && (p.data?.targetStatus === 'overloaded' || p.data?.targetStatus === 'failed')
+  const stroke = p.selected ? '#38bdf8' : isResp ? '#34d399' : rate > 0 ? (hot ? '#ef4444' : '#475569') : '#334155'
+  const dots: { cls: keyof typeof CLASS_COLOR | 'response'; i: number; n: number }[] = []
+  if (em && p.data?.playing && isResp && (em.response ?? 0) > 0.01) {
+    const n = Math.max(1, Math.min(6, Math.round(Math.log10((em.response ?? 0) + 1) * 1.5)))
+    for (let i = 0; i < n; i++) dots.push({ cls: 'response', i, n })
+  } else if (em && p.data?.playing) {
     for (const cls of ['read', 'write', 'async'] as const) {
       const r = em[cls]
       if (r <= 0.01) continue
@@ -197,20 +220,22 @@ const FlowEdge = memo(function FlowEdge(p: EdgeProps<FlowEdgeT>) {
   }
   return (
     <>
-      <BaseEdge id={p.id} path={path} markerEnd={p.markerEnd} style={{ stroke, strokeWidth: width, strokeDasharray: p.data?.virtual ? '5 5' : undefined, opacity: p.data?.virtual ? 0.6 : 1 }} />
+      <BaseEdge id={p.id} path={path} markerEnd={p.markerEnd} style={{ stroke, strokeWidth: width, strokeDasharray: p.data?.virtual ? '5 5' : isResp ? '7 4' : undefined, opacity: p.data?.virtual ? 0.6 : 1 }} />
       {dots.map((d) => (
-        <circle key={`${d.cls}-${d.i}`} r={d.cls === 'read' ? 3 : 3.5} fill={CLASS_COLOR[d.cls]}>
+        <circle key={`${d.cls}-${d.i}`} r={d.cls === 'read' ? 3 : 3.5} fill={d.cls === 'response' ? '#34d399' : CLASS_COLOR[d.cls]}>
           {/* negative begin = start mid-flight, so no particle sits at the origin waiting */}
           <animateMotion dur={`${hot ? 2.6 : 1.6}s`} repeatCount="indefinite" begin={`-${(d.i / d.n) * (hot ? 2.6 : 1.6) + (d.cls === 'write' ? 0.2 : d.cls === 'async' ? 0.4 : 0)}s`} path={path} />
         </circle>
       ))}
-      {(rate > 0 || (p.selected && !p.data?.virtual)) && (
+      {(rate > 0 || isResp || (p.selected && !p.data?.virtual)) && (
         <EdgeLabelRenderer>
           <div
             className="nodrag nopan absolute flex items-center gap-1 rounded bg-slate-950/90 px-1 text-[10px] text-slate-300"
             style={{ transform: `translate(-50%, -50%) translate(${lx}px, ${ly}px)`, pointerEvents: p.selected ? 'all' : 'none' }}
           >
-            {rate > 0 && <span>{fmtNum(rate)}/s{p.data?.virtual ? ' (miss fallback)' : ''}</span>}
+            {rate > 0 && !isResp && <span>{fmtNum(rate)}/s{p.data?.virtual ? ' (miss fallback)' : ''}</span>}
+            {isResp && em && <span className="text-emerald-300">↩ {fmtNum(em.response ?? 0)}/s · {fmtBytes(em.responseBytesPerSec ?? 0)}/s</span>}
+            {isResp && !em && <span className="text-emerald-300/80">↩ response</span>}
             {p.selected && !p.data?.virtual && (
               <button
                 type="button"
@@ -254,9 +279,9 @@ export function Canvas() {
         type: 'component',
         position: n.position,
         selected: n.id === selected,
-        data: { kind: n.kind, label: n.label, config: n.config, m: t?.nodes[n.id], showMetrics: hasRun, playing },
+        data: { kind: n.kind, label: n.label, config: resolveConfig(n.kind, n.config, state.workload), m: t?.nodes[n.id], showMetrics: hasRun, playing },
       })),
-    [state.design.nodes, selected, t, hasRun, playing],
+    [state.design.nodes, state.workload, selected, t, hasRun, playing],
   )
 
   const virtualEdges = useMemo(() => {
@@ -266,6 +291,7 @@ export function Canvas() {
     return out
   }, [state.design])
 
+  const clientIds = useMemo(() => new Set(state.design.nodes.filter((n) => n.kind === 'client').map((n) => n.id)), [state.design.nodes])
   const edges: FlowEdgeT[] = useMemo(
     () =>
       [...state.design.edges.map((e) => ({ ...e, virtual: false })), ...virtualEdges.map((e) => ({ ...e, virtual: true }))].map((e) => ({
@@ -278,9 +304,9 @@ export function Canvas() {
         selectable: !e.virtual,
         selected: e.id === selectedEdge,
         markerEnd: { type: MarkerType.ArrowClosed, color: '#64748b', width: 16, height: 16 },
-        data: { em: t?.edges[e.id], playing, virtual: e.virtual, targetStatus: t?.nodes[e.target]?.status },
+        data: { em: t?.edges[e.id], playing, virtual: e.virtual, response: clientIds.has(e.target), targetStatus: t?.nodes[e.target]?.status },
       })),
-    [state.design.edges, virtualEdges, t, playing, selectedEdge],
+    [state.design.edges, virtualEdges, t, playing, selectedEdge, clientIds],
   )
 
   const onNodesChange = useCallback(
@@ -390,6 +416,7 @@ function Legend() {
       <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full" style={{ background: CLASS_COLOR.read }} /> read</span>
       <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full" style={{ background: CLASS_COLOR.write }} /> write</span>
       <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full" style={{ background: CLASS_COLOR.async }} /> async</span>
+      <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-emerald-400" /> response</span>
     </div>
   )
 }

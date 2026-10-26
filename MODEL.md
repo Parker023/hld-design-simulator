@@ -78,6 +78,38 @@ Component specifics:
 | Rate limiter | traffic above `limitRps` is **rejected** (429), counted separately from failures |
 | Queue | delivered = min(backlog + published, broker capacity, consumer capacity); the rest is lag |
 
+## Hardware sizing
+
+Self-hosted components default to **hardware** sizing. You set vCPU, RAM, disk size and disk type,
+and capacity is derived (`src/engine/hardware.ts`). Switch a component to **manual** to type
+throughput directly. Defaults are chosen so both modes start with the same capacity.
+
+| Component | Derived from hardware |
+|---|---|
+| App servers | req/s = vCPU × req/s-per-core (500); max concurrent = min(vCPU × 100 threads, RAM ÷ memory per request) |
+| Load balancer / gateway / limiter | vCPU × 25,000 / 5,000 / 25,000 req/s |
+| Workers / lock | vCPU × 250 msg/s / vCPU × 2,500 ops/s |
+| Redis | cache memory = RAM × 0.8; ops/s = 50,000 × min(vCPU, 4) (main thread + I/O threads) |
+| SQL primary / replica / shard | reads = min(vCPU × 500, ½·IOPS ÷ buffer-pool miss); writes = min(vCPU × 125, ½·IOPS ÷ 2); buffer pool = RAM × 0.7, miss = max(1%, 1 − pool ÷ hot set); read latency += miss × disk read time; storage = disk |
+| NoSQL (per node) | min(vCPU × 2,500, IOPS ÷ miss) reads; min(vCPU × 2,500, 2 × IOPS) writes (LSM) |
+| Search (per node) | vCPU × 250 queries, min(vCPU × 125, IOPS ÷ 4) index ops |
+| Kafka | broker msgs/s = brokers × vCPU × 2,500; retained lag = brokers × disk ÷ (payload × 3 replicas), beyond which messages are lost |
+
+Disks: HDD 250 IOPS / 8 ms, SSD 3,000 / 0.5 ms, NVMe 25,000 / 0.1 ms. Hardware cost ≈ $22 per vCPU,
+$3 per GB RAM, plus disk per GB, per machine per month. CDN and object storage are managed
+services, so they are configured by throughput only.
+
+## Response connections
+
+An edge drawn from any component **to a Client** is a response path. It is not used to route
+requests (so it never creates a cycle). It shows the successful responses that component returns:
+
+```
+responses = Σ processed_k × ok(component, k)
+ok(n, k)  = 1 − Σ share × (1 − pass(target) × ok(target))   over synchronous downstream calls
+bandwidth = reads × payload + writes × 100 B ack
+```
+
 ## Health states
 
 * **healthy**: ρ < 0.7, no queue

@@ -3,7 +3,8 @@ import { CHALLENGES, blankDesign, type Challenge } from '../data/challenges'
 import { DEFAULT_CAPACITY_INPUTS } from '../engine/calculator'
 import { DEFAULT_SETTINGS, simulate } from '../engine/simulate'
 import type { Experiment } from '../engine/analysis'
-import type { SimResult } from '../engine/types'
+import type { Design, SimResult } from '../engine/types'
+import { supportsHardware } from '../engine/hardware'
 import { browserStore, type ChallengeState, type Prefs } from './storage'
 
 export type BottomTab = 'brief' | 'calculator' | 'timeline' | 'logs' | 'experiments' | 'review'
@@ -31,11 +32,30 @@ export function freshState(ch: Challenge): ChallengeState {
   }
 }
 
+/**
+ * Designs saved before hardware sizing existed typed throughput numbers directly.
+ * Keep them exactly as they were by marking those components as manual sizing.
+ */
+function migrateDesign(d: Design): Design {
+  return {
+    ...d,
+    nodes: d.nodes.map((n) => (supportsHardware(n.kind) && !('sizing' in n.config) ? { ...n, config: { ...n.config, sizing: 'manual' } } : n)),
+  }
+}
+
 function loadState(ch: Challenge): ChallengeState {
   const saved = store.loadChallenge(ch.id)
   if (!saved) return freshState(ch)
   const base = freshState(ch)
-  return { ...base, ...saved, progress: { ...base.progress, ...saved.progress }, capInputs: { ...base.capInputs, ...saved.capInputs } }
+  return {
+    ...base,
+    ...saved,
+    design: migrateDesign(saved.design),
+    savedDesigns: (saved.savedDesigns ?? []).map((x) => ({ ...x, design: migrateDesign(x.design) })),
+    experiments: (saved.experiments ?? []).map((x) => ({ ...x, design: migrateDesign(x.design) })),
+    progress: { ...base.progress, ...saved.progress },
+    capInputs: { ...base.capInputs, ...saved.capInputs },
+  }
 }
 
 interface WS {

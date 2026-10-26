@@ -1,4 +1,4 @@
-import { CATALOG, PALETTE_ORDER } from '../engine/components'
+import { CATALOG, PALETTE_ORDER, derivedKeys } from '../engine/components'
 import type { ComponentConfig, ComponentKind, Design, DesignEdge, DesignNode, Workload } from '../engine/types'
 
 export interface Challenge {
@@ -25,7 +25,8 @@ export const node = (kind: ComponentKind, x: number, y: number, config: Componen
   kind,
   label: label ?? CATALOG[kind].short,
   position: { x, y },
-  config: { ...CATALOG[kind].defaults, ...config },
+  // Explicit throughput numbers (e.g. readRps) only make sense in manual sizing; otherwise hardware derives them.
+  config: { ...CATALOG[kind].defaults, ...(!('sizing' in config) && derivedKeys(kind).some((k) => k in config) ? { sizing: 'manual' } : {}), ...config },
 })
 export const edge = (a: DesignNode, b: DesignNode): DesignEdge => ({ id: `e-${a.id}-${b.id}`, source: a.id, target: b.id })
 const design = (nodes: DesignNode[], links: [DesignNode, DesignNode][]): Design => ({ nodes, edges: links.map(([a, b]) => edge(a, b)) })
@@ -108,7 +109,7 @@ const urlShortener: Challenge = {
     'Click counting is a write per redirect. Does the user need to wait for it?',
     'Try a 10× peak. Where does the bottleneck move?',
   ],
-  starter: threeTier({ instances: 4 }, { readRps: 2000, writeRps: 500 }),
+  starter: threeTier({ instances: 4 }, { vcpu: 4, ramGb: 16 }), // 4 vCPU → 2,000 reads/s, 500 writes/s
   reference: {
     design: urlShortenerRef,
     notes: [
@@ -361,7 +362,7 @@ const jobScheduler: Challenge = {
   components: PALETTE_ORDER,
   evaluation: ['Spikes absorbed by queue.', 'Lock/lease prevents double runs.', 'Workers sized for drain time.'],
   hints: ['Many jobs fire at :00. What is your peak multiplier?', 'How does a worker claim a job so no one else runs it?'],
-  starter: threeTier({ instances: 4 }, { readRps: 2000, writeRps: 500 }),
+  starter: threeTier({ instances: 4 }, { vcpu: 4, ramGb: 16 }), // 4 vCPU → 2,000 reads/s, 500 writes/s
   reference: {
     design: simpleRef((_c, _lb, a) => {
       const db = node('sharded_db', 660, 120, { shards: 4 }, 'Job table', 'db')

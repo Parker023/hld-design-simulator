@@ -15,7 +15,7 @@
  *        throughput ≤ instances × maxConcurrent ÷ (processing + downstream latency)
  *    using the previous tick's downstream latency, so slow databases cascade upstream.
  */
-import { CATALOG, componentAvailability, monthlyCost, num, str } from './components'
+import { CATALOG, componentAvailability, monthlyCost, num, resolveConfig, str } from './components'
 import { estimate } from './calculator'
 import {
   CLASSES,
@@ -38,6 +38,8 @@ import type { Category } from './components'
 export const HOP_MS = 0.5
 export const DEGRADED_UTIL = 0.7
 export const DOWNSTREAM_EMA = 0.3
+/** size of a write acknowledgement response */
+export const WRITE_ACK_BYTES = 100
 export const DEFAULT_SETTINGS: SimSettings = { profile: 'ramp', dt: 1, ticks: 60 }
 
 const zero = (): ClassRates => ({ read: 0, write: 0, async: 0 })
@@ -59,12 +61,14 @@ export interface Model {
   edgeId: Map<string, string>
   warnings: string[]
   syncReachable: Set<string>
+  /** edges drawn back to a Client: responses, not request routes */
+  responseEdges: { id: string; source: string; client: string }[]
 }
 
 const key = (s: string, t: string) => `${s}->${t}`
 const TERMINAL: Category[] = ['store', 'sidecar']
 
-export function buildModel(design: Design): Model {
+export function buildModel(design: Design, workload?: Workload): Model {
   const warnings: string[] = []
   const nodes = new Map<string, ModelNode>()
   for (const n of design.nodes) {
@@ -72,18 +76,22 @@ export function buildModel(design: Design): Model {
       id: n.id,
       kind: n.kind,
       label: n.label,
-      cfg: { ...CATALOG[n.kind].defaults, ...n.config },
+      cfg: resolveConfig(n.kind, n.config, workload),
       category: CATALOG[n.kind].category,
       targets: [],
     })
   }
   const edgeId = new Map<string, string>()
+  const responseEdges: Model['responseEdges'] = []
   for (const e of design.edges) {
     const s = nodes.get(e.source)
     const t = nodes.get(e.target)
     if (!s || !t || s.id === t.id || edgeId.has(key(s.id, t.id))) continue
-    if (t.kind === 'client') continue
     edgeId.set(key(s.id, t.id), e.id)
+    if (t.kind === 'client') {
+      if (s.kind !== 'client') responseEdges.push({ id: e.id, source: s.id, client: t.id })
+      continue
+    }
     if (TERMINAL.includes(s.category)) continue // stores are terminal; edges out of them are informational
     s.targets.push(t.id)
   }
@@ -155,7 +163,10 @@ export function buildModel(design: Design): Model {
   for (const n of nodes.values())
     if (n.kind !== 'client' && !allReachable.has(n.id)) warnings.push(`${n.label} receives no traffic (not reachable from a Client).`)
 
-  return { nodes, order, clients, edgeId, warnings, syncReachable }
+  for (const r of responseEdges)
+    if (!allReachable.has(r.source)) warnings.push(`${nodes.get(r.source)!.label} → ${nodes.get(r.client)!.label} is a response path, but ${nodes.get(r.source)!.label} receives no requests.`)
+
+  return { nodes, order, clients, edgeId, warnings, syncReachable, responseEdges }
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +205,7 @@ function capacityOf(n: ModelNode, downstreamMs: number, ctx: { consumerCap: numb
       return both(num(c, 'rpsCapacity'), num(c, 'latencyMs'))
     case 'rdbms': {
       const pool = num(c, 'connectionPool', 1)
-      const rl = num(c, 'readLatencyMs', 1)
+      const rl = num(c, 'effectiveReadLatencyMs', num(c, 'readLatencyMs', 1))
       const wl = num(c, 'writeLatencyMs', 1)
       const replicas = num(c, 'readReplicas')
       const read = Math.min(num(c, 'readRps'), (pool * 1000) / rl) * (1 + replicas)
@@ -202,7 +213,7 @@ function capacityOf(n: ModelNode, downstreamMs: number, ctx: { consumerCap: numb
       return { cap: { read, write, async: write }, lat: { read: rl, write: wl, async: wl }, timeoutMs: num(c, 'timeoutMs', 1000) }
     }
     case 'read_replica': {
-      const rl = num(c, 'readLatencyMs', 1)
+      const rl = num(c, 'effectiveReadLatencyMs', num(c, 'readLatencyMs', 1))
       const read = Math.min(num(c, 'readRps'), (num(c, 'connectionPool', 1) * 1000) / rl)
       return { cap: { read, write: 0, async: 0 }, lat: { read: rl, write: 0, async: 0 }, timeoutMs: num(c, 'timeoutMs', 1000) }
     }
@@ -214,7 +225,7 @@ function capacityOf(n: ModelNode, downstreamMs: number, ctx: { consumerCap: numb
       const latMul = mode === 'strong' ? 2 : mode === 'quorum' ? 1.5 : 1
       const read = (nodes * num(c, 'readRpsPerNode')) / touched
       const write = (nodes * num(c, 'writeRpsPerNode')) / rf
-      const rl = num(c, 'readLatencyMs', 1) * latMul
+      const rl = num(c, 'effectiveReadLatencyMs', num(c, 'readLatencyMs', 1)) * latMul
       const wl = num(c, 'writeLatencyMs', 1) * latMul
       return { cap: { read, write, async: write }, lat: { read: rl, write: wl, async: wl }, timeoutMs: num(c, 'timeoutMs', 1000) }
     }
@@ -223,7 +234,7 @@ function capacityOf(n: ModelNode, downstreamMs: number, ctx: { consumerCap: numb
       const skew = Math.max(1, num(c, 'hotShardSkew', 1))
       const read = (shards * num(c, 'readRpsPerShard')) / skew
       const write = (shards * num(c, 'writeRpsPerShard')) / skew
-      const rl = num(c, 'readLatencyMs', 1)
+      const rl = num(c, 'effectiveReadLatencyMs', num(c, 'readLatencyMs', 1))
       const wl = num(c, 'writeLatencyMs', 1)
       return { cap: { read, write, async: write }, lat: { read: rl, write: wl, async: wl }, timeoutMs: num(c, 'timeoutMs', 1000) }
     }
@@ -238,7 +249,7 @@ function capacityOf(n: ModelNode, downstreamMs: number, ctx: { consumerCap: numb
       return { cap: { read: nodes * num(c, 'queryRpsPerNode'), write: w, async: w }, lat: { read: l, write: l, async: l }, timeoutMs: num(c, 'timeoutMs', 1000) }
     }
     case 'queue': {
-      const broker = num(c, 'partitions', 1) * num(c, 'rpsPerPartition')
+      const broker = queueBrokerRps(c)
       const l = num(c, 'enqueueLatencyMs')
       return { cap: { read: 0, write: 0, async: Math.min(broker, Math.max(ctx.consumerCap, 0)) }, lat: { read: 0, write: 0, async: l }, timeoutMs: Infinity }
     }
@@ -253,6 +264,11 @@ function capacityOf(n: ModelNode, downstreamMs: number, ctx: { consumerCap: numb
       return { cap: { read: 0, write: cap, async: 0 }, lat: { read: 0, write: l, async: 0 }, timeoutMs: num(c, 'timeoutMs', 500) }
     }
   }
+}
+
+/** Queue publish capacity: partitions × per-partition, capped by broker hardware when sized by hardware. */
+export function queueBrokerRps(c: ComponentConfig): number {
+  return Math.min(num(c, 'partitions', 1) * num(c, 'rpsPerPartition'), num(c, 'brokerRps', Infinity))
 }
 
 /** Utilization → latency multiplier. Exported for tests/docs. */
@@ -305,7 +321,7 @@ interface Share {
 }
 
 export function simulate(design: Design, workload: Workload, settings: SimSettings = DEFAULT_SETTINGS): SimResult {
-  const model = buildModel(design)
+  const model = buildModel(design, workload)
   const { nodes, order } = model
   const dt = Math.max(0.01, settings.dt)
   const est = estimate(workload)
@@ -414,12 +430,18 @@ export function simulate(design: Design, workload: Workload, settings: SimSettin
         const lat = cap.lat.read * latencyInflation(m.utilization)
         m.latencyMs = { read: lat, write: lat, async: 0 }
       } else if (n.kind === 'queue') {
-        const broker = num(n.cfg, 'partitions', 1) * num(n.cfg, 'rpsPerPartition') * dt
+        const broker = queueBrokerRps(n.cfg) * dt
         const published = Math.min(inc.async, broker)
         m.failed = (inc.async - published) / dt
         const available = b.async + published
         const delivered = Math.min(available, cap.cap.async * dt)
         b.async = available - delivered
+        // Brokers retain only as much lag as their disks hold; older messages are lost.
+        const maxBacklog = num(n.cfg, 'maxBacklogMsgs', Infinity)
+        if (b.async > maxBacklog) {
+          m.failed += (b.async - maxBacklog) / dt
+          b.async = maxBacklog
+        }
         out.async = delivered
         m.processed.async = delivered / dt
         m.backlog = b.async
@@ -589,6 +611,30 @@ export function simulate(design: Design, workload: Workload, settings: SimSettin
       // EMA damping: thread pools respond to downstream slowness gradually, which avoids tick-to-tick oscillation.
       const prev = prevDownstream.get(id)
       prevDownstream.set(id, (prev ?? 0) + DOWNSTREAM_EMA * (Math.max(0, down) - (prev ?? 0)))
+    }
+
+    // --- Responses: what each response edge's source successfully returns to the client.
+    const okMemo = new Map<string, number>()
+    const pass = (id: string, cls: RequestClass) => {
+      const m = metrics[id]
+      return m.offered[cls] > 0 ? Math.min(1, m.processed[cls] / m.offered[cls]) : m.status === 'failed' ? 0 : 1
+    }
+    /** fraction of requests processed at `id` that also succeed in everything downstream */
+    const ok = (id: string, cls: RequestClass): number => {
+      const k = `${id}|${cls}`
+      if (okMemo.has(k)) return okMemo.get(k)!
+      okMemo.set(k, 1)
+      let lost = 0
+      for (const sh of shares.get(id)?.[cls] ?? []) if (sh.sync) lost += sh.fraction * (1 - pass(sh.target, sh.to) * ok(sh.target, sh.to))
+      const v = Math.min(1, Math.max(0, 1 - lost))
+      okMemo.set(k, v)
+      return v
+    }
+    for (const r of model.responseEdges) {
+      const m = metrics[r.source]
+      const reads = m.processed.read * ok(r.source, 'read')
+      const writes = m.processed.write * ok(r.source, 'write')
+      edges[r.id] = { rate: reads + writes, read: 0, write: 0, async: 0, response: reads + writes, responseBytesPerSec: reads * workload.payloadBytes + writes * WRITE_ACK_BYTES }
     }
 
     let readLat = 0

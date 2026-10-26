@@ -1,30 +1,31 @@
 import { useState } from 'react'
 import { compareEstimate, estimate, fmtBytes, fmtNum, fmtValue, parseEstimate, type CalcStep, type CapacityInputs } from '../engine/calculator'
 import type { Workload } from '../engine/types'
+import { HelpTip } from './HelpTip'
 import { useWS } from './store'
 
-const WORKLOAD_FIELDS: { key: keyof Workload; label: string; step: number; help?: string; unit?: string }[] = [
-  { key: 'dau', label: 'Daily active users', step: 1_000_000 },
-  { key: 'requestsPerUserPerDay', label: 'Requests / user / day', step: 1 },
-  { key: 'readWriteRatio', label: 'Read : write ratio (R:1)', step: 1, help: '100 means 100 reads per write' },
-  { key: 'peakMultiplier', label: 'Peak multiplier', step: 0.5, unit: '×' },
-  { key: 'payloadBytes', label: 'Avg record / payload', step: 100, unit: 'B' },
-  { key: 'retentionYears', label: 'Retention', step: 1, unit: 'years' },
-  { key: 'hotDataFraction', label: 'Hot data fraction', step: 0.05, help: '80/20 rule: 20% of daily reads are hot' },
-  { key: 'latencyTargetMs', label: 'Latency target', step: 10, unit: 'ms' },
-  { key: 'availabilityTarget', label: 'Availability target', step: 0.0001 },
+const WORKLOAD_FIELDS: { key: keyof Workload; label: string; step: number; help: string; unit?: string }[] = [
+  { key: 'dau', label: 'Daily active users', step: 1_000_000, help: 'Distinct users who use the product on a typical day. The starting point for all traffic estimates.' },
+  { key: 'requestsPerUserPerDay', label: 'Requests / user / day', step: 1, help: 'How many requests one active user makes per day on average (reads + writes). DAU × this = daily requests.' },
+  { key: 'readWriteRatio', label: 'Read : write ratio (R:1)', step: 1, help: 'How many reads happen for every write. 100 means 100 reads per write (very read-heavy, e.g. URL redirects); 1 means equal reads and writes (e.g. chat).' },
+  { key: 'peakMultiplier', label: 'Peak multiplier', step: 0.5, unit: '×', help: 'How much busier the busiest moment is than the daily average. 3 means peak traffic is 3× the average requests per second. Systems must be sized for the peak.' },
+  { key: 'payloadBytes', label: 'Avg record / payload', step: 100, unit: 'B', help: 'Average size of one stored record and of one response, in bytes. Drives storage growth, cache memory and bandwidth.' },
+  { key: 'retentionYears', label: 'Retention', step: 1, unit: 'years', help: 'How long data must be kept. Total storage = daily growth × retention.' },
+  { key: 'hotDataFraction', label: 'Hot data fraction', step: 0.05, help: 'Share of daily reads that hit popular, frequently requested data (80/20 rule → 0.2). Sets how much memory a cache or database needs to keep the hot set in RAM.' },
+  { key: 'latencyTargetMs', label: 'Latency target', step: 10, unit: 'ms', help: 'The response time you promise users. The simulation flags designs whose modeled mean latency exceeds it.' },
+  { key: 'availabilityTarget', label: 'Availability target', step: 0.0001, help: 'Fraction of time the service must work, e.g. 0.999 = “three nines” ≈ 8.8 hours of downtime per year.' },
 ]
 
-const CAP_FIELDS: { key: keyof CapacityInputs; label: string; step: number }[] = [
-  { key: 'appRpsPerInstance', label: 'App req/s per instance', step: 100 },
-  { key: 'dbReadRpsPerNode', label: 'DB reads/s per node', step: 100 },
-  { key: 'dbWriteRpsPerNode', label: 'DB writes/s per node', step: 50 },
-  { key: 'cacheHitRatio', label: 'Assumed cache hit ratio', step: 0.05 },
-  { key: 'targetUtilization', label: 'Target utilization (headroom)', step: 0.05 },
-  { key: 'indexOverhead', label: 'Index overhead', step: 0.05 },
-  { key: 'replicationFactor', label: 'Replication factor', step: 1 },
-  { key: 'eventsPerRequest', label: 'Async events / request', step: 0.1 },
-  { key: 'consumerRpsPerInstance', label: 'Consumer events/s per instance', step: 50 },
+const CAP_FIELDS: { key: keyof CapacityInputs; label: string; step: number; help: string }[] = [
+  { key: 'appRpsPerInstance', label: 'App req/s per instance', step: 100, help: 'Requests per second one application server can handle. Used to work out how many app instances you need.' },
+  { key: 'dbReadRpsPerNode', label: 'DB reads/s per node', step: 100, help: 'Read queries per second one database machine can serve. Used to size read replicas.' },
+  { key: 'dbWriteRpsPerNode', label: 'DB writes/s per node', step: 50, help: 'Writes per second one database primary or shard can accept. Used to decide whether you need sharding.' },
+  { key: 'cacheHitRatio', label: 'Assumed cache hit ratio', step: 0.05, help: 'Fraction of reads you expect the cache to answer. Only the rest reach the database.' },
+  { key: 'targetUtilization', label: 'Target utilization (headroom)', step: 0.05, help: 'How busy you allow each machine to be at peak. 0.7 keeps 30% spare for spikes and failures; sizing divides by this.' },
+  { key: 'indexOverhead', label: 'Index overhead', step: 0.05, help: 'Extra storage for database indexes, as a fraction of raw data (0.3 = 30% more).' },
+  { key: 'replicationFactor', label: 'Replication factor', step: 1, help: 'Number of copies of the data kept for durability. Multiplies the storage you must provision.' },
+  { key: 'eventsPerRequest', label: 'Async events / request', step: 0.1, help: 'Background messages each request produces (e.g. one click event per redirect). Sets the queue throughput needed.' },
+  { key: 'consumerRpsPerInstance', label: 'Consumer events/s per instance', step: 50, help: 'Messages per second one queue consumer (worker) can process. Used to size the worker pool.' },
 ]
 
 export function WorkloadInputs({ compact }: { compact?: boolean }) {
@@ -32,9 +33,10 @@ export function WorkloadInputs({ compact }: { compact?: boolean }) {
   return (
     <div className={`grid gap-2 ${compact ? 'grid-cols-2' : 'grid-cols-2 md:grid-cols-3 xl:grid-cols-5'}`}>
       {WORKLOAD_FIELDS.map((f) => (
-        <label key={f.key} className="block" title={f.help}>
-          <div className="mb-0.5 text-[11px] text-slate-400">
-            {f.label} {f.unit && <span className="text-slate-600">({f.unit})</span>}
+        <label key={f.key} className="block">
+          <div className="mb-0.5 flex items-center text-[11px] text-slate-400">
+            {f.label} {f.unit && <span className="ml-1 text-slate-600">({f.unit})</span>}
+            <HelpTip text={f.help} />
           </div>
           <input
             type="number"
@@ -77,6 +79,7 @@ export function Calculator() {
           <label className="flex items-center gap-2 text-xs text-slate-300">
             <input type="checkbox" checked={quiz} onChange={(ev) => setQuiz(ev.target.checked)} className="accent-sky-500" />
             Estimate first, then reveal
+            <HelpTip text="Interview practice: type your own estimate for each value, then press Reveal to see the calculated answer and how close you were (within 2× counts as close)." />
           </label>
         </div>
         <WorkloadInputs />
@@ -135,7 +138,10 @@ export function Calculator() {
           <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
             {CAP_FIELDS.map((f) => (
               <label key={f.key} className="block">
-                <div className="mb-0.5 text-[11px] text-slate-400">{f.label}</div>
+                <div className="mb-0.5 flex items-center text-[11px] text-slate-400">
+                  {f.label}
+                  <HelpTip text={f.help} />
+                </div>
                 <input
                   type="number"
                   step={f.step}

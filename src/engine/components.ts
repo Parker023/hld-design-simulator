@@ -1,13 +1,15 @@
-import type { ComponentConfig, ComponentKind } from './types'
+import type { ComponentConfig, ComponentKind, Workload } from './types'
+import { HARDWARE, SIZING_FIELD, applyHardware, isHardwareMode, machineCost } from './hardware'
 
 // Component catalog: defaults, editable fields, and the explicit (illustrative)
 // cost + availability assumptions used by the simulator. These are MODELED
 // numbers chosen to be in a plausible range, not vendor benchmarks.
 
+type FieldBase = { key: string; label: string; help?: string; /** shown only in hardware sizing mode */ hw?: boolean }
 export type FieldDef =
-  | { key: string; label: string; type: 'number'; min?: number; max?: number; step?: number; unit?: string; help?: string }
-  | { key: string; label: string; type: 'select'; options: string[]; help?: string }
-  | { key: string; label: string; type: 'boolean'; help?: string }
+  | (FieldBase & { type: 'number'; min?: number; max?: number; step?: number; unit?: string })
+  | (FieldBase & { type: 'select'; options: string[] })
+  | (FieldBase & { type: 'boolean' })
 
 export type Category = 'source' | 'edge' | 'proxy' | 'compute' | 'cache' | 'store' | 'async' | 'worker' | 'sidecar'
 
@@ -360,6 +362,76 @@ export const CATALOG: Record<ComponentKind, ComponentSpec> = {
   },
 }
 
+/** Plain-language explanation for every config field (shown behind the "?" icon). Field-specific help takes precedence. */
+export const FIELD_HELP: Record<string, string> = {
+  sizing: 'How capacity is decided. Hardware: you choose machine size (vCPU, RAM, disk) and throughput is calculated from it. Manual: you type throughput numbers directly.',
+  vcpu: 'Number of virtual CPU cores on each machine. More cores means more requests processed in parallel.',
+  ramGb: 'Memory (RAM) on each machine, in GB. Limits how much data can be kept in memory and how many requests can be in flight at once.',
+  diskGb: 'Disk space on each machine, in GB. For databases this is where data lives, so it must cover retention × replication.',
+  diskType: 'Kind of disk. HDD is cheap but slow (250 IOPS); SSD is the common default (3,000 IOPS); NVMe is fastest (25,000 IOPS). Matters when data does not fit in RAM and for write-heavy loads.',
+  rpsPerCore: 'How many requests one CPU core can handle per second with your application code. Lighter code means a higher number.',
+  memPerRequestMb: 'Memory used by one request while it is being processed (buffers, objects, thread stack). RAM ÷ this = max concurrent requests.',
+  brokers: 'Number of Kafka/SQS broker machines. More brokers means more publish throughput and more disk for retaining lag.',
+  instances: 'How many identical copies (machines/containers) run behind the load balancer. Total capacity = instances × per-instance capacity; also removes single points of failure.',
+  rpsPerInstance: 'Requests per second one instance can sustain before it saturates.',
+  latencyMs: 'Time this component adds to each request when it is not busy. Grows as utilization rises.',
+  timeoutMs: 'How long a request may wait in this component’s queue before it is given up on and counted as failed.',
+  failed: 'Simulate this component crashing for the whole run, to see how the rest of the design copes.',
+  limitRps: 'Maximum requests per second let through. Anything above is rejected immediately with HTTP 429 instead of overloading the backend.',
+  rpsCapacity: 'Maximum operations per second this component can process.',
+  processingMs: 'CPU time the app spends on one request, excluding waiting on databases or caches.',
+  maxConcurrent: 'Maximum requests one instance can work on at the same time (threads/connections). Slow downstream calls hold these slots longer.',
+  eventsPerRequest: 'Extra background work each request creates, such as recording a click. With a queue connected it happens asynchronously; otherwise it becomes extra database writes on the request path.',
+  hitRatioMode: 'fixed: you set the hit ratio directly. working-set: the hit ratio is calculated from cache memory vs. the size of frequently accessed data.',
+  hitRatio: 'Fraction of reads found in the cache (0–1). 0.9 means 90% of reads never reach the database.',
+  memoryGb: 'Memory available for cached data, in GB.',
+  eviction: 'What gets removed when the cache is full. LRU: least recently used. LFU: least frequently used. TTL: entries expire after a fixed time.',
+  onFailure: 'What happens to reads when the cache is down or overloaded. fallthrough: go to the database instead (slower, more DB load). fail: return an error.',
+  readRps: 'Maximum read queries per second the database can serve.',
+  writeRps: 'Maximum write queries per second the database can accept (inserts/updates).',
+  readLatencyMs: 'Time for one read when the data is in memory.',
+  writeLatencyMs: 'Time for one write, including making it durable on disk.',
+  connectionPool: 'Maximum open database connections. Throughput can’t exceed connections ÷ query time (Little’s law).',
+  readReplicas: 'Read-only copies of the database. Each adds read capacity and a failover target, but not write capacity.',
+  storageGb: 'Disk space for the database’s data.',
+  replicationFactor: 'How many copies of each piece of data are stored. More copies means better durability, but each write is done that many times.',
+  nodes: 'Number of machines in the cluster. Data and load are spread across them.',
+  readRpsPerNode: 'Reads per second one node can serve.',
+  writeRpsPerNode: 'Writes per second one node can accept.',
+  consistency: 'eventual: read one replica (fast, may be stale). quorum: read a majority (balanced). strong: read all replicas (always fresh, slowest).',
+  storageGbPerNode: 'Disk space on each node, in GB.',
+  replicationLagMs: 'How far behind the primary this replica typically is. Reads here may return slightly old data.',
+  shards: 'Number of independent database partitions. Each shard holds a slice of the data and handles its own reads and writes.',
+  readRpsPerShard: 'Reads per second one shard can serve.',
+  writeRpsPerShard: 'Writes per second one shard can accept.',
+  strategy: 'How rows are assigned to shards. hash: even spread. range: by key ranges (easy range scans, risk of hot ranges). geo: by region.',
+  hotShardSkew: 'How much busier the hottest shard is than average (1 = perfectly even). Total capacity is limited by the hottest shard.',
+  storageGbPerShard: 'Disk space on each shard, in GB.',
+  partitions: 'Number of queue partitions. Each can be consumed in parallel, so more partitions means more throughput.',
+  rpsPerPartition: 'Messages per second one partition can handle.',
+  enqueueLatencyMs: 'Time to publish one message. This is all the caller waits for; the work itself happens later.',
+  queryRpsPerNode: 'Search queries per second one node can answer.',
+  indexRpsPerNode: 'Documents per second one node can add or update in the index.',
+}
+
+// Hardware sizing: every self-hosted component gets vCPU / RAM / disk inputs (default mode).
+for (const [kind, hw] of Object.entries(HARDWARE) as [ComponentKind, NonNullable<(typeof HARDWARE)[ComponentKind]>][]) {
+  const spec = CATALOG[kind]
+  spec.defaults = { sizing: 'hardware', ...spec.defaults, ...hw.defaults }
+  spec.fields = [SIZING_FIELD, ...hw.fields.map((f) => ({ ...f, hw: true })), ...spec.fields]
+}
+
+// Every field gets an explanation: generic text first, then any component-specific note.
+for (const spec of Object.values(CATALOG))
+  spec.fields = spec.fields.map((f) => {
+    const generic = FIELD_HELP[f.key]
+    const help = generic && f.help && !generic.includes(f.help) ? `${generic} ${f.help}` : (f.help ?? generic)
+    return { ...f, help }
+  })
+
+/** Keys computed from hardware for this kind (inputs only in manual mode). */
+export const derivedKeys = (kind: ComponentKind): string[] => HARDWARE[kind]?.derived ?? []
+
 export const PALETTE_ORDER: ComponentKind[] = [
   'client',
   'cdn',
@@ -393,9 +465,23 @@ export const withDefaults = (kind: ComponentKind, cfg: ComponentConfig = {}): Co
   ...cfg,
 })
 
+/** Effective configuration used by the simulator: defaults + user config + hardware-derived capacity. */
+export const resolveConfig = (kind: ComponentKind, cfg: ComponentConfig = {}, workload?: Workload): ComponentConfig =>
+  applyHardware(kind, withDefaults(kind, cfg), workload)
+
 // ---- Illustrative monthly cost model (USD). Ballpark cloud list prices, rounded.
 export function monthlyCost(kind: ComponentKind, raw: ComponentConfig): number {
   const c = withDefaults(kind, raw)
+  if (isHardwareMode(kind, c)) {
+    const machines =
+      kind === 'rdbms' ? 1 + num(c, 'readReplicas')
+      : kind === 'nosql' || kind === 'search' ? num(c, 'nodes', 1)
+      : kind === 'sharded_db' ? num(c, 'shards', 1)
+      : kind === 'queue' ? num(c, 'brokers', 1)
+      : ['app_server', 'dns_lb', 'api_gateway', 'worker'].includes(kind) ? num(c, 'instances', 1)
+      : 1
+    return machineCost(c) * machines
+  }
   switch (kind) {
     case 'client':
       return 0

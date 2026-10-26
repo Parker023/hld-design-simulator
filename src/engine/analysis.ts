@@ -1,4 +1,4 @@
-import { CATALOG, num, str, withDefaults } from './components'
+import { CATALOG, num, resolveConfig, str, withDefaults } from './components'
 import { estimate, fmtBytes, fmtNum } from './calculator'
 import type { ComponentKind, Design, SimSettings, SimSummary, Workload } from './types'
 
@@ -220,7 +220,7 @@ export function insights(design: Design, workload: Workload, summary: SimSummary
   // storage capacity
   const needRaw = e.rawStorageBytes * 1.3
   for (const n of design.nodes) {
-    const c = withDefaults(n.kind, n.config)
+    const c = resolveConfig(n.kind, n.config, workload)
     let have = 0
     if (n.kind === 'rdbms') have = num(c, 'storageGb') * 1e9
     else if (n.kind === 'sharded_db') have = num(c, 'storageGbPerShard') * num(c, 'shards', 1) * 1e9
@@ -231,7 +231,7 @@ export function insights(design: Design, workload: Workload, summary: SimSummary
       out.push({ level: 'warn', title: `${n.label} runs out of disk`, detail: `Needs ≈ ${fmtBytes(needRaw)} (raw + 30% index) for ${workload.retentionYears} years; configured ${fmtBytes(have)}. Full in ≈ ${Math.floor(have / (e.dailyStorageBytes * 1.3))} days.` })
   }
   for (const n of design.nodes) {
-    const c = withDefaults(n.kind, n.config)
+    const c = resolveConfig(n.kind, n.config, workload)
     if (n.kind === 'cache' && str(c, 'hitRatioMode') === 'fixed' && num(c, 'memoryGb') * 1e9 < e.cacheMemoryBytes * 0.5)
       out.push({ level: 'info', title: `${n.label}: is the hit ratio realistic?`, detail: `Memory ${num(c, 'memoryGb')} GB vs hot set ≈ ${fmtBytes(e.cacheMemoryBytes)}. A fixed ${num(c, 'hitRatio')} hit ratio may be optimistic; switch to the working-set model.` })
   }
@@ -263,7 +263,7 @@ export interface EvalCriterion {
 export function evaluate(i: EvalInput): EvalCriterion[] {
   const kinds = new Set(i.design.nodes.map((n) => n.kind))
   const has = (k: ComponentKind) => kinds.has(k)
-  const nodesOf = (k: ComponentKind) => i.design.nodes.filter((n) => n.kind === k).map((n) => withDefaults(n.kind, n.config))
+  const nodesOf = (k: ComponentKind) => i.design.nodes.filter((n) => n.kind === k).map((n) => resolveConfig(n.kind, n.config, i.workload))
   const words = (s: string) => s.trim().split(/\s+/).filter(Boolean).length
   const c: EvalCriterion[] = []
   const clamp = (n: number) => Math.max(0, Math.min(4, n))
