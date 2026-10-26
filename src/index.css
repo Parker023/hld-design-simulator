@@ -1,0 +1,44 @@
+@import 'tailwindcss';
+
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #020617;
+}
+
+/* Overloaded components pulse their border so bottlenecks are obvious at a glance. */
+@keyframes overload-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
+  50% { box-shadow: 0 0 0 7px rgba(239, 68, 68, 0); }
+}
+.node-overloaded { animation: overload-pulse 1.2s ease-out infinite; }
+
+@keyframes ping-slow {
+  75%, 100% { transform: scale(1.8); opacity: 0.4; }
+}
+.animate-ping-slow { animation: ping-slow 1.2s cubic-bezier(0, 0, 0.2, 1) infinite; }
+
+/* Failed requests "drop out" below a node. */
+@keyframes drop {
+  0% { transform: translateY(0); opacity: 1; }
+  100% { transform: translateY(34px); opacity: 0; }
+}
+.drop-particle {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: #ef4444;
+  animation: drop 1s ease-in infinite;
+}
+
+.react-flow__controls button { background: #0f172a; border-color: #1e293b; color: #cbd5e1; }
+.react-flow__controls button:hover { background: #1e293b; }
+
+@media (prefers-reduced-motion: reduce) {
+  .node-overloaded, .animate-ping-slow, .drop-particle { animation: none; }
+}
